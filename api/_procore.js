@@ -457,12 +457,14 @@ async function soft(ctx, label, fn, fallback = []) {
 //   • every project keeps its own "last synced" time, so incremental syncs are
 //     correct no matter who synced which projects before.
 
-// When was this project last synced? Older snapshots (before per-project times)
-// fall back to the snapshot's single sync time.
-function syncTimeFor(meta, projectId, hasRecords) {
+// When was this project last synced? A project that was pulled and simply has
+// no items still has a sync time, so it counts as synced.
+// Older snapshots (before per-project times) pulled every project the syncing
+// user could see, so they fall back to that snapshot's single sync time.
+function syncTimeFor(meta, projectId) {
   if (!meta) return null;
   if (meta.projectSync) return meta.projectSync[String(projectId)] || null;
-  return hasRecords ? meta.syncedAt || null : null;
+  return meta.syncedAt || null;
 }
 
 function makeResourceHandler({ resource, concurrency = 3, fetchForProject, hydrate = r => r, mergeRecord }) {
@@ -481,7 +483,7 @@ function makeResourceHandler({ resource, concurrency = 3, fetchForProject, hydra
       const times = [];
       let unsynced = 0;
       for (const id of allowed.keys()) {
-        const t = syncTimeFor(meta, id, withRecords.has(id));
+        const t = syncTimeFor(meta, id);
         if (t) times.push(t); else unsynced++;
       }
       times.sort();
@@ -515,8 +517,7 @@ function makeResourceHandler({ resource, concurrency = 3, fetchForProject, hydra
       // 1. Normal page load: serve saved data (no Procore data calls) — unless none
       //    of this user's projects have ever been pulled, then pull them now.
       if (mode === 'read' && cache.data) {
-        const have = new Set(cache.data.map(r => r.project_id));
-        const allUnsynced = projects.length > 0 && projects.every(p => !syncTimeFor(cache.meta, p.id, have.has(p.id)));
+        const allUnsynced = projects.length > 0 && projects.every(p => !syncTimeFor(cache.meta, p.id));
         if (!allUnsynced) return send(cache.data, cache.meta, projects, 'HIT');
         mode = 'sync';
       }
@@ -545,7 +546,7 @@ function makeResourceHandler({ resource, concurrency = 3, fetchForProject, hydra
 
         // Per project: changes-only if it has a sync time (and this isn't a full rebuild)
         const sinceFor = new Map(projects.map(p => [
-          p.id, mode === 'sync' ? syncTimeFor(oldMeta, p.id, haveRecords.has(p.id)) : null,
+          p.id, mode === 'sync' ? syncTimeFor(oldMeta, p.id) : null,
         ]));
         const fullCount = [...sinceFor.values()].filter(v => !v).length;
         console.log(`[${resource}] ${mode} by user ${ctx.userKey}: ${projects.length} projects (${fullCount} full, ${projects.length - fullCount} changes-only)`);
@@ -568,10 +569,20 @@ function makeResourceHandler({ resource, concurrency = 3, fetchForProject, hydra
         });
         let final = mergeRecords(data.filter(r => !replaceIds.has(r.project_id)), mergeRecs, mergeRecord).concat(replaceRecs);
 
-        // Per-project sync times (convert older snapshots on the way)
+        // Per-project sync times. Converting an older snapshot: every project it
+        // covered gets the old sync time — including projects that had no items.
+        // Those are the projects with records plus the company project list the
+        // older version kept, plus anything in the "seen" registry.
         const projectSync = { ...(oldMeta?.projectSync || {}) };
         if (oldMeta && !oldMeta.projectSync && oldMeta.syncedAt) {
-          for (const id of haveRecords) projectSync[String(id)] = oldMeta.syncedAt;
+          const legacyList = (await upGet(`c:${companyId}:projects:data`)) || [];
+          const legacySeen = (await upGet(seenKey(companyId))) || {};
+          const covered = new Set([
+            ...[...haveRecords].map(String),
+            ...(Array.isArray(legacyList) ? legacyList.map(p => String(p.id)) : []),
+            ...Object.keys(legacySeen),
+          ]);
+          for (const id of covered) projectSync[id] = oldMeta.syncedAt;
         }
         for (const p of projects) if (!skippedIds.has(p.id)) projectSync[String(p.id)] = startedAt;
 

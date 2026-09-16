@@ -146,6 +146,32 @@ function ProcoreIconBtn({ url }) {
 const SortIcon = ({active, dir}) => <span style={{marginLeft:4,opacity:active?1:0.25,color:active?C.brand:C.textTertiary}}>{active?(dir==="asc"?"↑":"↓"):"↕"}</span>;
 const Dash = () => <span style={{color:C.textTertiary}}>—</span>;
 
+// Table box that scrolls both ways inside the window, so the side-scroll bar
+// is always at the bottom of the screen and the column headers stay visible.
+function TableScroller({ children }) {
+  return (
+    <div className="pm-scroll" tabIndex={0} aria-label="Table, scroll to see more"
+      style={{overflow:"auto",maxHeight:"calc(100vh - 170px)",minHeight:320}}>
+      {children}
+    </div>
+  );
+}
+
+// "Keith Lacasse (Department of Veterans Affairs - Manchester NH)" → name on top, company underneath
+function PersonCell({ value, width = 210 }) {
+  if (!value) return <Dash/>;
+  const text = String(value);
+  const m = text.match(/^(.*?)\s*\((.+)\)\s*$/);
+  const name = m ? m[1] : text;
+  const org = m ? m[2] : null;
+  return (
+    <div title={text} style={{maxWidth:width}}>
+      <div style={{...ellipsis(width),fontSize:12,color:C.text}}>{name}</div>
+      {org&&<div style={{...ellipsis(width),fontSize:10.5,color:C.textTertiary,marginTop:1}}>{org}</div>}
+    </div>
+  );
+}
+
 const chipStyle = s => ({
   fontFamily:F,fontSize:11,fontWeight:600,padding:"2px 7px",borderRadius:6,cursor:"pointer",whiteSpace:"nowrap",
   color:s.color,background:s.bg,border:`1px solid ${s.border}`,
@@ -199,6 +225,7 @@ const th = {
   padding:"11px 16px",textAlign:"left",fontSize:11,fontWeight:600,letterSpacing:"0.05em",
   textTransform:"uppercase",color:C.textSecondary,background:C.surfaceAlt,
   borderBottom:`1px solid ${C.border}`,cursor:"pointer",userSelect:"none",whiteSpace:"nowrap",fontFamily:F,
+  position:"sticky",top:0,zIndex:2,boxShadow:`inset 0 -1px 0 ${C.border}`,
 };
 const td = {padding:"12px 16px",fontSize:13,color:C.text,borderBottom:`1px solid ${C.border}`,verticalAlign:"middle",fontFamily:F};
 const ellipsis = w => ({display:"block",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:w});
@@ -296,7 +323,7 @@ function RFITab({ rfis, loading, onExportView, exporting }) {
 
       <div style={tableCard}>
         {loading && !rfis.length ? <Spinner label="Loading RFIs…"/> : (
-          <div style={{overflowX:"auto"}}>
+          <TableScroller>
             <table style={{width:"100%",borderCollapse:"collapse"}}>
               <thead><tr>
                 <th style={{...th,cursor:"default",width:36,padding:"11px 6px 11px 10px"}}></th>
@@ -312,10 +339,10 @@ function RFITab({ rfis, loading, onExportView, exporting }) {
                       <ProcoreIconBtn url={rfi.procore_url}/>
                       <td style={td}><Badge flag={rfi.flag}/></td>
                       <td style={{...td,fontWeight:600,color:C.brand,fontSize:12,whiteSpace:"nowrap"}}>{rfi.number}</td>
-                      <td style={{...td,maxWidth:160}}><span style={{...ellipsis(160),fontSize:12,color:C.textSecondary}} title={rfi.project_name}>{rfi.project_name}</span></td>
+                      <td style={{...td,maxWidth:220}}><span style={{...ellipsis(220),fontSize:12,color:C.textSecondary}} title={rfi.project_name}>{rfi.project_name}</span></td>
                       <td style={{...td,maxWidth:280}}><span style={ellipsis(280)} title={rfi.subject}>{rfi.subject}</span></td>
-                      <td style={{...td,fontSize:12,color:C.textSecondary,whiteSpace:"nowrap"}}>{rfi.ball_in_court||<Dash/>}</td>
-                      <td style={{...td,fontSize:12,color:C.textSecondary,whiteSpace:"nowrap"}}>{rfi.received_from||<Dash/>}</td>
+                      <td style={td}><PersonCell value={rfi.ball_in_court}/></td>
+                      <td style={td}><PersonCell value={rfi.received_from} width={170}/></td>
                       <td style={{...td,fontSize:12,color:C.textSecondary,whiteSpace:"nowrap"}}>{fmt(rfi.submitted_at)||<Dash/>}</td>
                       <td style={{...td,fontSize:12,whiteSpace:"nowrap"}}>
                         {rfi.due_date ? (
@@ -331,7 +358,7 @@ function RFITab({ rfis, loading, onExportView, exporting }) {
               </tbody>
             </table>
             {filtered.length===0&&<div style={{padding:56,textAlign:"center",color:C.textTertiary,fontSize:13}}>No RFIs match these filters.</div>}
-          </div>
+          </TableScroller>
         )}
       </div>
     </div>
@@ -430,22 +457,8 @@ function SubmittalsTab({ submittals, loading, onExportView, exporting }) {
 }
 
 function SubmittalsTable({ filtered, sortField, sortDir, sort }) {
-  const scrollRef = useRef(null);
-  const topRef = useRef(null);
-  const sync = (from, to) => { if (from.current && to.current) to.current.scrollLeft = from.current.scrollLeft; };
-
-  useEffect(()=>{
-    const el = scrollRef.current;
-    if (!el) return;
-    const obs = new ResizeObserver(()=>{ if (topRef.current) topRef.current.firstChild.style.width = el.scrollWidth + "px"; });
-    obs.observe(el);
-    return ()=>obs.disconnect();
-  },[]);
-
   return (
-    <>
-      <div ref={topRef} onScroll={()=>sync(topRef,scrollRef)} style={{overflowX:"auto",overflowY:"hidden",borderBottom:`1px solid ${C.border}`,height:12}}><div style={{height:1}}/></div>
-      <div ref={scrollRef} onScroll={()=>sync(scrollRef,topRef)} style={{overflowX:"auto"}}>
+      <TableScroller>
         <table style={{width:"100%",borderCollapse:"collapse"}}>
           <thead><tr>
             <th style={{...th,cursor:"default",width:36,padding:"11px 6px 11px 10px"}}></th>
@@ -460,12 +473,12 @@ function SubmittalsTable({ filtered, sortField, sortDir, sort }) {
               return (
                 <tr key={s.id} style={{background:i%2===0?C.surface:C.surfaceAlt}}>
                   <ProcoreIconBtn url={s.procore_url}/>
-                  <td style={{...td,maxWidth:150}}><span style={{...ellipsis(150),fontSize:12,color:C.textSecondary}} title={s.project_name}>{safeVal(s.project_name)}</span></td>
+                  <td style={{...td,maxWidth:200}}><span style={{...ellipsis(200),fontSize:12,color:C.textSecondary}} title={s.project_name}>{safeVal(s.project_name)}</span></td>
                   <td style={{...td,fontWeight:600,color:C.brand,fontSize:12,whiteSpace:"nowrap"}}>{safeVal(s.number)}</td>
                   <td style={{...td,maxWidth:160}}><span style={{...ellipsis(160),fontSize:12,color:C.textSecondary}} title={s.spec_section||""}>{safeVal(s.spec_section)||<Dash/>}</span></td>
                   <td style={{...td,maxWidth:240}}><span style={ellipsis(240)} title={s.title}>{safeVal(s.title)}</span></td>
                   <td style={{...td,fontSize:12,color:C.textSecondary,whiteSpace:"nowrap"}}>{safeVal(s.responsible_contractor)||<Dash/>}</td>
-                  <td style={{...td,fontSize:12,color:C.textSecondary,whiteSpace:"nowrap"}}>{safeVal(s.ball_in_court)||<Dash/>}</td>
+                  <td style={td}><PersonCell value={safeVal(s.ball_in_court)} width={180}/></td>
                   <td style={td}><StatusBadge label={safeVal(s.status)||"unknown"} scheme={SUB_STATUS[s.status_key]}/></td>
                   <td style={{...td,fontSize:12,whiteSpace:"nowrap"}}>
                     {s.due_date ? (
@@ -484,8 +497,7 @@ function SubmittalsTable({ filtered, sortField, sortDir, sort }) {
           </tbody>
         </table>
         {filtered.length===0&&<div style={{padding:56,textAlign:"center",color:C.textTertiary,fontSize:13}}>No submittals match these filters.</div>}
-      </div>
-    </>
+      </TableScroller>
   );
 }
 
@@ -588,7 +600,7 @@ function ChangeEventsTab({ changeEvents, loading, coByEvent, coLoaded, pin, onCl
 
       <div style={tableCard}>
         {loading && !changeEvents.length ? <Spinner label="Loading change events…"/> : (
-          <div style={{overflowX:"auto"}}>
+          <TableScroller>
             <table style={{width:"100%",borderCollapse:"collapse"}}>
               <thead><tr>
                 <th style={{...th,cursor:"default",width:36,padding:"11px 6px 11px 10px"}}></th>
@@ -628,7 +640,7 @@ function ChangeEventsTab({ changeEvents, loading, coByEvent, coLoaded, pin, onCl
               </tbody>
             </table>
             {filtered.length===0&&<div style={{padding:56,textAlign:"center",color:C.textTertiary,fontSize:13}}>No change events match these filters.</div>}
-          </div>
+          </TableScroller>
         )}
       </div>
     </div>
@@ -729,7 +741,7 @@ function ChangeOrdersTab({ changeOrders, loading, ceById, ceLoaded, pin, onClear
 
       <div style={tableCard}>
         {loading && !changeOrders.length ? <Spinner label="Loading change orders…"/> : (
-          <div style={{overflowX:"auto"}}>
+          <TableScroller>
             <table style={{width:"100%",borderCollapse:"collapse"}}>
               <thead><tr>
                 <th style={{...th,cursor:"default",width:36,padding:"11px 6px 11px 10px"}}></th>
@@ -786,7 +798,7 @@ function ChangeOrdersTab({ changeOrders, loading, ceById, ceLoaded, pin, onClear
               </tbody>
             </table>
             {filtered.length===0&&<div style={{padding:56,textAlign:"center",color:C.textTertiary,fontSize:13}}>No change orders match these filters.</div>}
-          </div>
+          </TableScroller>
         )}
       </div>
     </div>
@@ -1167,13 +1179,20 @@ export default function App() {
         body{background:${C.bg};-webkit-font-smoothing:antialiased}
         input:focus,select:focus,button:focus-visible,a:focus-visible{border-color:${C.brand}!important;box-shadow:0 0 0 3px ${C.brandLight}!important;outline:none}
         .pm-link:hover{background:#f0d0d0!important}
-        ::-webkit-scrollbar{width:5px;height:5px}
-        ::-webkit-scrollbar-thumb{background:${C.borderStrong};border-radius:3px}
+        ::-webkit-scrollbar{width:8px;height:8px}
+        ::-webkit-scrollbar-thumb{background:${C.borderStrong};border-radius:4px}
+        .pm-scroll{scrollbar-width:auto;scrollbar-color:${C.grey} ${C.brandLight}}
+        .pm-scroll::-webkit-scrollbar{width:12px;height:12px}
+        .pm-scroll::-webkit-scrollbar-track{background:${C.brandLight}}
+        .pm-scroll::-webkit-scrollbar-thumb{background:${C.grey};border-radius:6px;border:2px solid ${C.brandLight}}
+        .pm-scroll::-webkit-scrollbar-thumb:hover{background:${C.brandMid}}
+        .pm-scroll::-webkit-scrollbar-corner{background:${C.brandLight}}
+        .pm-scroll:focus-visible{outline:2px solid ${C.brand};outline-offset:-2px}
         @keyframes spin{to{transform:rotate(360deg)}}
         @media (prefers-reduced-motion: reduce){*{animation-duration:2s!important}}
       `}</style>
 
-      <header style={{background:"rgba(255,255,255,0.9)",backdropFilter:"saturate(180%) blur(20px)",WebkitBackdropFilter:"saturate(180%) blur(20px)",borderBottom:`1px solid ${C.border}`,position:"sticky",top:0,zIndex:100,minHeight:60,padding:"8px 28px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:16,flexWrap:"wrap"}}>
+      <header style={{background:"rgba(255,255,255,0.9)",backdropFilter:"saturate(180%) blur(20px)",WebkitBackdropFilter:"saturate(180%) blur(20px)",borderBottom:`1px solid ${C.border}`,position:"relative",zIndex:100,minHeight:60,padding:"8px 28px",display:"flex",alignItems:"center",justifyContent:"space-between",gap:16,flexWrap:"wrap"}}>
         <div style={{display:"flex",alignItems:"center",gap:13,flexWrap:"wrap"}}>
           <div style={{width:30,height:30,borderRadius:8,background:C.brand,display:"flex",alignItems:"center",justifyContent:"center"}}>
             <span style={{color:"#fff",fontSize:13,fontWeight:700}}>E</span>
@@ -1226,7 +1245,7 @@ export default function App() {
         })}
       </nav>
 
-      <main style={{maxWidth:1520,margin:"0 auto",padding:"28px 28px 56px"}}>
+      <main style={{maxWidth:2400,margin:"0 auto",padding:"24px clamp(16px, 2vw, 32px) 28px"}}>
         {showReminder&&(
           <SyncReminder syncedAt={oldestSync} onSync={()=>loadAll("sync")}
             onSnooze={()=>setSnoozeUntil(Date.now() + SNOOZE_HOURS*3600000)}/>
