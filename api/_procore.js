@@ -278,20 +278,37 @@ async function listProjectItems(path, ctx, params, since) {
   }
 }
 
-// ── Projects (slim, cached per company) ───────────────────────────────────────
+// ── Projects ──────────────────────────────────────────────────────────────────
+// Each user's project list comes from Procore using THEIR login, so it only
+// contains projects they are allowed to see (admins see every project).
+// It is cached per user for 6 hours.
+//
+// A company-wide "seen" registry records the last time anyone saw each project
+// as active. Projects nobody has seen for 30 days are dropped from saved data.
+const SEEN_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+const seenKey = companyId => `c:${companyId}:projects:seen`;
+
+async function markProjectsSeen(companyId, list) {
+  if (!list.length) return;
+  const seen = (await upGet(seenKey(companyId))) || {};
+  const now = Date.now();
+  for (const p of list) seen[String(p.id)] = { name: p.name, at: now };
+  await upSet(seenKey(companyId), seen);
+}
+
 async function getProjects(ctx, { force = false } = {}) {
-  const dataKey = `c:${ctx.companyId}:projects:data`;
-  const syncKey = `c:${ctx.companyId}:projects:synced_at`;
+  const key = `c:${ctx.companyId}:u:${ctx.userKey}:projects`;
   if (!force) {
-    const [cached, syncedAt] = await Promise.all([upGet(dataKey), upGet(syncKey)]);
-    if (cached && syncedAt && Date.now() - new Date(syncedAt).getTime() < PROJECTS_FRESH_MS) return cached;
+    const cached = await upGet(key);
+    if (cached?.at && Array.isArray(cached.list) && Date.now() - cached.at < PROJECTS_FRESH_MS) return cached.list;
   }
-  // Procore's List Projects returns active projects by default.
+  // Procore's List Projects returns active projects this user can access.
   const raw = await procoreGetAll('/rest/v1.0/projects', ctx, { company_id: ctx.companyId });
-  const slim = raw.filter(p => p && p.active !== false).map(p => ({ id: p.id, name: p.name }));
-  await Promise.all([upSet(dataKey, slim), upSet(syncKey, new Date().toISOString())]);
-  console.log(`[projects] company ${ctx.companyId}: ${slim.length} active`);
-  return slim;
+  const list = raw.filter(p => p && p.active !== false).map(p => ({ id: p.id, name: p.name }));
+  await upSet(key, { at: Date.now(), list }, { ex: 7 * 24 * 3600 });
+  await markProjectsSeen(ctx.companyId, list);
+  console.log(`[projects] company ${ctx.companyId}, user ${ctx.userKey}: ${list.length} accessible`);
+  return list;
 }
 
 // ── Concurrency with rate-limit awareness ─────────────────────────────────────
@@ -431,81 +448,156 @@ async function soft(ctx, label, fn, fallback = []) {
   }
 }
 
-// ── Generic handler for RFIs / Submittals / Change Events ─────────────────────
+// ── Generic handler for RFIs / Submittals / Change Events / Change Orders ─────
+//
+// Saved data is shared per company, but:
+//   • each user only receives records for projects their Procore login can see;
+//   • a sync only touches the projects the syncing user can see — it never
+//     removes other projects' data;
+//   • every project keeps its own "last synced" time, so incremental syncs are
+//     correct no matter who synced which projects before.
+
+// When was this project last synced? Older snapshots (before per-project times)
+// fall back to the snapshot's single sync time.
+function syncTimeFor(meta, projectId, hasRecords) {
+  if (!meta) return null;
+  if (meta.projectSync) return meta.projectSync[String(projectId)] || null;
+  return hasRecords ? meta.syncedAt || null : null;
+}
+
 function makeResourceHandler({ resource, concurrency = 3, fetchForProject, hydrate = r => r, mergeRecord }) {
   return async (req, res) => {
     const session = await requireSession(req, res);
     if (!session) return;
     const ctx = makeCtx(session);
     const companyId = ctx.companyId;
-    const mode = req.query.force === 'true' ? 'full' : req.query.sync === 'true' ? 'sync' : 'read';
+    let mode = req.query.force === 'true' ? 'full' : req.query.sync === 'true' ? 'sync' : 'read';
 
-    const send = (records, meta, cacheStatus, extra = {}) => {
+    // Everything sent to the browser goes through here: filtered to this user's projects
+    const send = (records, meta, projects, cacheStatus, extra = {}) => {
+      const allowed = new Map(projects.map(p => [p.id, p.name]));
+      const visible = records.filter(r => allowed.has(r.project_id));
+      const withRecords = new Set(visible.map(r => r.project_id));
+      const times = [];
+      let unsynced = 0;
+      for (const id of allowed.keys()) {
+        const t = syncTimeFor(meta, id, withRecords.has(id));
+        if (t) times.push(t); else unsynced++;
+      }
+      times.sort();
+      const names = [...allowed.values()];
+      const userMeta = {
+        syncedAt: times[0] || null,             // oldest sync among this user's projects
+        lastSyncAt: meta?.syncedAt || null,     // most recent sync by anyone
+        mode: meta?.mode || null,
+        total: visible.length,
+        withData: withRecords.size,
+        withNone: Math.max(allowed.size - withRecords.size, 0),
+        projectCount: allowed.size,
+        unsynced,
+        skipped: (meta?.skipped || []).filter(s => s && typeof s === 'object' && allowed.has(s.id)).map(s => s.name),
+        notes: (meta?.notes || []).filter(n => names.some(name => String(n).startsWith(`${name} `))),
+      };
       res.setHeader('X-Cache', cacheStatus);
-      if (meta?.syncedAt) res.setHeader('X-Cache-SyncedAt', meta.syncedAt);
-      if (meta) res.setHeader('X-Sync-Summary', encodeURIComponent(JSON.stringify(meta)));
+      if (userMeta.syncedAt) res.setHeader('X-Cache-SyncedAt', userMeta.syncedAt);
+      res.setHeader('X-Sync-Summary', encodeURIComponent(JSON.stringify(userMeta)));
       for (const [k, v] of Object.entries(extra)) res.setHeader(k, String(v));
       const today = todayStr();
-      res.json(records.map(r => hydrate(r, today)));
+      res.json(visible.map(r => hydrate(r, today)));
     };
 
     try {
-      const cache = await getCache(companyId, resource);
+      const [cache, projects] = await Promise.all([
+        getCache(companyId, resource),
+        getProjects(ctx, { force: mode === 'full' }),
+      ]);
 
-      // 1. Normal page load: serve the snapshot, no Procore calls.
-      if (mode === 'read' && cache.data) return send(cache.data, cache.meta, 'HIT');
+      // 1. Normal page load: serve saved data (no Procore data calls) — unless none
+      //    of this user's projects have ever been pulled, then pull them now.
+      if (mode === 'read' && cache.data) {
+        const have = new Set(cache.data.map(r => r.project_id));
+        const allUnsynced = projects.length > 0 && projects.every(p => !syncTimeFor(cache.meta, p.id, have.has(p.id)));
+        if (!allUnsynced) return send(cache.data, cache.meta, projects, 'HIT');
+        mode = 'sync';
+      }
+      if (!projects.length) return send(cache.data || [], cache.meta, projects, 'HIT');
 
-      // 2. Sync requested (or first run for this company).
+      // 2. Sync. One writer per company + tool at a time.
       const lockKey = `lock:${companyId}:${resource}`;
       if (!(await acquireLock(lockKey))) {
-        if (cache.data) return send(cache.data, cache.meta, 'SYNCING');
+        if (cache.data) return send(cache.data, cache.meta, projects, 'SYNCING');
         return res.status(409).json({ error: 'SYNC_IN_PROGRESS' });
       }
 
       try {
-        const incremental = mode === 'sync' && !!cache.data && !!cache.meta?.syncedAt;
+        // Re-read inside the lock so we build on the newest saved copy
+        const fresh = await getCache(companyId, resource);
+        const data = fresh.data || [];
+        const oldMeta = fresh.meta || null;
         const startedAt = new Date().toISOString();
-        const since = incremental ? cache.meta.syncedAt : null;
-        const projects = await getProjects(ctx, { force: mode === 'full' });
-        console.log(`[${resource}] ${incremental ? `incremental since ${since}` : 'full'} — ${projects.length} projects`);
+        const haveRecords = new Set(data.map(r => r.project_id));
 
-        const cachedByProject = new Map();
-        for (const r of cache.data || []) {
-          if (!cachedByProject.has(r.project_id)) cachedByProject.set(r.project_id, []);
-          cachedByProject.get(r.project_id).push(r);
+        const byProject = new Map();
+        for (const r of data) {
+          if (!byProject.has(r.project_id)) byProject.set(r.project_id, []);
+          byProject.get(r.project_id).push(r);
         }
+
+        // Per project: changes-only if it has a sync time (and this isn't a full rebuild)
+        const sinceFor = new Map(projects.map(p => [
+          p.id, mode === 'sync' ? syncTimeFor(oldMeta, p.id, haveRecords.has(p.id)) : null,
+        ]));
+        const fullCount = [...sinceFor.values()].filter(v => !v).length;
+        console.log(`[${resource}] ${mode} by user ${ctx.userKey}: ${projects.length} projects (${fullCount} full, ${projects.length - fullCount} changes-only)`);
+
         const { results, skipped } = await concurrentMap(
-          projects, concurrency, p => fetchForProject(ctx, p, since, cachedByProject.get(p.id) || []), ctx
+          projects, concurrency,
+          p => fetchForProject(ctx, p, sinceFor.get(p.id), byProject.get(p.id) || []),
+          ctx
         );
-        const fresh = results.flat();
-        const activeIds = new Set(projects.map(p => p.id));
         const skippedIds = new Set(skipped.map(s => s.id));
 
-        let final;
-        if (incremental) {
-          // Drop records from projects that are no longer active, then apply changes
-          final = mergeRecords(cache.data.filter(r => activeIds.has(r.project_id)), fresh, mergeRecord);
-        } else {
-          // Full rebuild: keep old records only for projects that failed this time
-          const kept = (cache.data || []).filter(r => skippedIds.has(r.project_id));
-          final = fresh.concat(kept);
-        }
+        // Build the new shared copy. Projects this user can't see are left untouched.
+        const replaceIds = new Set();
+        const replaceRecs = [];
+        const mergeRecs = [];
+        projects.forEach((p, i) => {
+          if (skippedIds.has(p.id)) return;
+          if (sinceFor.get(p.id)) mergeRecs.push(...results[i]);
+          else { replaceIds.add(p.id); replaceRecs.push(...results[i]); }
+        });
+        let final = mergeRecords(data.filter(r => !replaceIds.has(r.project_id)), mergeRecs, mergeRecord).concat(replaceRecs);
 
-        const withData = new Set(final.map(r => r.project_id)).size;
+        // Per-project sync times (convert older snapshots on the way)
+        const projectSync = { ...(oldMeta?.projectSync || {}) };
+        if (oldMeta && !oldMeta.projectSync && oldMeta.syncedAt) {
+          for (const id of haveRecords) projectSync[String(id)] = oldMeta.syncedAt;
+        }
+        for (const p of projects) if (!skippedIds.has(p.id)) projectSync[String(p.id)] = startedAt;
+
+        // Drop projects nobody has seen as active for 30 days
+        const seen = (await upGet(seenKey(companyId))) || {};
+        const now = Date.now();
+        for (const p of projects) seen[String(p.id)] = { name: p.name, at: now };
+        for (const r of final) if (!seen[String(r.project_id)]) seen[String(r.project_id)] = { name: r.project_name, at: now };
+        const stale = new Set(Object.entries(seen).filter(([, v]) => !v?.at || v.at < now - SEEN_KEEP_MS).map(([k]) => k));
+        if (stale.size) {
+          final = final.filter(r => !stale.has(String(r.project_id)));
+          for (const id of stale) { delete seen[id]; delete projectSync[id]; }
+          console.log(`[${resource}] removed ${stale.size} project(s) not seen as active in 30 days`);
+        }
+        await upSet(seenKey(companyId), seen);
+
         const meta = {
           syncedAt: startedAt,
-          mode: incremental ? 'incremental' : 'full',
-          total: final.length,
-          updates: fresh.length,
-          withData,
-          withNone: Math.max(projects.length - withData, 0),
-          projectCount: projects.length,
-          skipped: skipped.map(s => s.name),
-          notes: ctx.notes.slice(0, 25),
+          mode: fullCount === projects.length ? 'full' : 'incremental',
+          projectSync,
+          skipped: skipped.map(s => ({ id: s.id, name: s.name })),
+          notes: ctx.notes.slice(0, 50),
         };
         const ok = await setCache(companyId, resource, final, meta);
         await flushRateLimit(ctx);
-        return send(final, meta, incremental ? 'INCREMENTAL' : 'FULL', { 'X-Cache-Write': ok ? 'ok' : 'failed' });
+        return send(final, meta, projects, meta.mode === 'full' ? 'FULL' : 'INCREMENTAL', { 'X-Cache-Write': ok ? 'ok' : 'failed' });
       } finally {
         await releaseLock(lockKey);
       }

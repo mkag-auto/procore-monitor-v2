@@ -6,8 +6,10 @@ import { buildWorkbook, buildViewWorkbook } from "./exportWorkbook.js";
 // Click "Sync" to pull changes. To auto-sync when the snapshot gets old,
 // set this to a number of hours (e.g. 12). null = only sync when you click.
 const AUTO_SYNC_AFTER_HOURS = null;
-const STALE_WARN_HOURS = 4;    // age pill turns amber
-const STALE_ALERT_HOURS = 24;  // age pill turns red
+const STALE_WARN_HOURS = 4;       // age pill turns amber
+const SYNC_REMINDER_HOURS = 8;    // yellow "time to sync" banner appears
+const STALE_ALERT_HOURS = 24;     // age pill and banner turn red
+const SNOOZE_HOURS = 2;           // "Remind me later" hides the banner this long
 
 // ── Design tokens ────────────────────────────────────────────────────────────
 const C = {
@@ -825,10 +827,11 @@ function DataHealthFooter({ tabs, rateLimit, onFullRebuild, busy }) {
                     {status==="idle"&&"Not loaded"}
                     {status==="loading"&&(tab.loadingLabel||"Loading…")}
                     {status==="error"&&tab.error}
-                    {(status==="ok"||status==="warn")&&m&&<>{m.total.toLocaleString()} records, {m.withData} of {m.projectCount ?? m.withData + m.withNone} projects</>}
+                    {(status==="ok"||status==="warn")&&m&&<>{m.total.toLocaleString()} records in {m.withData} of your {m.projectCount ?? m.withData + m.withNone} projects</>}
                     {skipped.length>0&&<span style={{color:"#b91c1c",fontWeight:600}}>, {skipped.length} failed</span>}
                   </div>
                   {skipped.length>0&&<div style={{fontSize:10,color:"#92400e",marginTop:2,...ellipsis(240)}} title={skipped.join(", ")}>Failed last sync: {skipped.join(", ")}</div>}
+                  {m?.unsynced>0&&<div style={{fontSize:10,color:"#92400e",marginTop:2}}>{m.unsynced} project{m.unsynced!==1?"s":""} not pulled yet</div>}
                   {m?.notes?.length>0&&<div style={{fontSize:10,color:"#92400e",marginTop:2,...ellipsis(240),cursor:"help"}} title={m.notes.join("\n")}>{m.notes.length} partial result{m.notes.length!==1?"s":""} (hover for details)</div>}
                 </div>
                 {tab.meta?.syncedAt&&(status==="ok"||status==="warn")&&(
@@ -888,17 +891,36 @@ function CompanyPicker({ session, onSwitch, disabled }) {
   );
 }
 
-function AgePill({ syncedAt }) {
+function AgePill({ syncedAt, onSync, busy }) {
   if (!syncedAt) return null;
   const h = ageHours(syncedAt);
   const tone = h >= STALE_ALERT_HOURS ? {bg:"#fef2f2",fg:"#b91c1c",bd:"#fecaca"}
     : h >= STALE_WARN_HOURS ? {bg:"#fffbeb",fg:"#92400e",bd:"#fcd34d"}
     : {bg:"#f0fdf4",fg:"#15803d",bd:"#bbf7d0"};
   return (
-    <span title={`Oldest data on screen was synced ${new Date(syncedAt).toLocaleString()}`}
-      style={{fontSize:11,fontWeight:500,padding:"3px 9px",borderRadius:7,background:tone.bg,color:tone.fg,border:`1px solid ${tone.bd}`,whiteSpace:"nowrap"}}>
+    <button onClick={onSync} disabled={busy}
+      title={`Oldest data on screen was synced ${new Date(syncedAt).toLocaleString()}. Click to sync.`}
+      style={{fontFamily:F,fontSize:11,fontWeight:500,padding:"3px 9px",borderRadius:7,background:tone.bg,color:tone.fg,border:`1px solid ${tone.bd}`,whiteSpace:"nowrap",cursor:busy?"default":"pointer"}}>
       Data from {ageText(syncedAt)}
-    </span>
+    </button>
+  );
+}
+
+function SyncReminder({ syncedAt, onSync, onSnooze }) {
+  const hrs = ageHours(syncedAt);
+  const urgent = hrs >= STALE_ALERT_HOURS;
+  const tone = urgent ? {bg:"#fef2f2",bd:"#fecaca",fg:"#b91c1c"} : {bg:"#fffbeb",bd:"#fcd34d",fg:"#92400e"};
+  return (
+    <div role="status" style={{background:tone.bg,border:`1px solid ${tone.bd}`,borderRadius:12,padding:"12px 18px",marginBottom:20,display:"flex",alignItems:"center",justifyContent:"space-between",gap:16,flexWrap:"wrap"}}>
+      <div style={{fontSize:12.5,color:tone.fg}}>
+        <b>{urgent ? "This data is over a day old." : "Time to sync."}</b>{" "}
+        Some of what you're seeing was last pulled from Procore {ageText(syncedAt)}, so recent changes may be missing.
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button onClick={onSnooze} style={{...btn,padding:"7px 12px"}}>Remind me later</button>
+        <button onClick={onSync} style={{background:C.brand,color:"#fff",border:"none",borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:500,cursor:"pointer",fontFamily:F,whiteSpace:"nowrap"}}>Sync with Procore</button>
+      </div>
+    </div>
   );
 }
 
@@ -925,6 +947,8 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [rateLimit, setRateLimit] = useState(null);
   const [pin, setPin] = useState(null); // { tab, ids:Set, label } — "show only these linked items"
+  const [, setTick] = useState(0);          // re-render every minute so data age stays current
+  const [snoozeUntil, setSnoozeUntil] = useState(0);
   const epoch = useRef(0); // bumps on company switch so stale responses are ignored
   const autoSyncDone = useRef(false);
 
@@ -1018,6 +1042,11 @@ export default function App() {
   };
   const openTab = tab => { setActiveTab(tab); if (pin && pin.tab !== tab) setPin(null); };
 
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 60000);
+    return () => clearInterval(id);
+  }, []);
+
   const oldestSync = useMemo(() => {
     const times = TABS.map(t=>tabs[t.id].meta?.syncedAt).filter(Boolean);
     return times.length ? times.sort()[0] : null;
@@ -1050,7 +1079,7 @@ export default function App() {
   };
 
   const fullRebuild = () => {
-    if (window.confirm("Full rebuild re-downloads every record for every project and uses a lot of Procore API calls. Continue?")) loadAll("full");
+    if (window.confirm("Full rebuild re-downloads every record for all of your projects and uses a lot of Procore API calls. Other people's projects are not affected. Continue?")) loadAll("full");
   };
 
   const [exportingView, setExportingView] = useState(false);
@@ -1113,6 +1142,10 @@ export default function App() {
     }
   };
 
+  const unsyncedMax = Math.max(0, ...TABS.map(t => tabs[t.id].meta?.unsynced || 0));
+  const showReminder = !!oldestSync && !busy
+    && ageHours(oldestSync) >= SYNC_REMINDER_HOURS
+    && Date.now() >= snoozeUntil;
   const currentTab = tabs[activeTab];
   const allLoaded = TABS.every(t => tabs[t.id].loaded);
   const rfiAlerts = useMemo(()=>tabs.rfis.data.filter(r=>ATTENTION_FLAGS.includes(r.flag)).length,[tabs.rfis.data]);
@@ -1151,7 +1184,7 @@ export default function App() {
           </div>
           <div style={{width:1,height:26,background:C.border,margin:"0 2px"}}/>
           <CompanyPicker session={session} onSwitch={switchCompany} disabled={busy}/>
-          <AgePill syncedAt={oldestSync}/>
+          <AgePill syncedAt={oldestSync} onSync={()=>loadAll("sync")} busy={busy}/>
         </div>
 
         <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
@@ -1194,6 +1227,20 @@ export default function App() {
       </nav>
 
       <main style={{maxWidth:1520,margin:"0 auto",padding:"28px 28px 56px"}}>
+        {showReminder&&(
+          <SyncReminder syncedAt={oldestSync} onSync={()=>loadAll("sync")}
+            onSnooze={()=>setSnoozeUntil(Date.now() + SNOOZE_HOURS*3600000)}/>
+        )}
+
+        {unsyncedMax>0&&!busy&&(
+          <div style={{background:"#fffbeb",border:"1px solid #fcd34d",borderRadius:12,padding:"12px 18px",marginBottom:20,display:"flex",alignItems:"center",justifyContent:"space-between",gap:16}}>
+            <div style={{fontSize:12.5,color:"#92400e"}}>
+              {unsyncedMax} of your projects {unsyncedMax===1?"hasn't":"haven't"} been pulled from Procore yet, so {unsyncedMax===1?"it isn't":"they aren't"} shown.
+            </div>
+            <button onClick={()=>loadAll("sync")} style={{background:C.brand,color:"#fff",border:"none",borderRadius:8,padding:"7px 14px",fontSize:12,fontWeight:500,cursor:"pointer",fontFamily:F,whiteSpace:"nowrap"}}>Sync now</button>
+          </div>
+        )}
+
         {currentTab.error&&(
           <div style={{background:"#fef2f2",border:"1px solid #fecaca",borderRadius:12,padding:"16px 20px",marginBottom:24,display:"flex",alignItems:"center",justifyContent:"space-between",gap:16}}>
             <div>
