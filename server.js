@@ -21,6 +21,7 @@ const routes = {
   'change-events': './api/change-events',
   'change-orders': './api/change-orders',
   'co-diagnostics': './api/co-diagnostics',
+  'setup-check': './api/setup-check',
 };
 
 for (const [name, file] of Object.entries(routes)) {

@@ -9,12 +9,41 @@
 //     so a snapshot from yesterday still shows today's overdue items correctly.
 const axios = require('axios');
 const crypto = require('crypto');
-const { Redis } = require('@upstash/redis');
+const { Redis } = require('@upstash/redis');  // used only when REDIS_URL isn't set
 
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN,
-});
+// Storage: Railway Redis (REDIS_URL) if present, otherwise Upstash REST.
+// Both are wrapped so the rest of the app sees the same get/set/del behaviour
+// (values stored as JSON, set() supports { ex, nx } and returns 'OK' or null).
+function makeStore() {
+  if (process.env.REDIS_URL) {
+    const IORedis = require('ioredis');
+    // family: 0 lets ioredis use Railway's private (IPv6) network
+    const client = new IORedis(process.env.REDIS_URL, { family: 0, maxRetriesPerRequest: 3 });
+    client.on('error', e => console.warn('[redis] connection error:', e.message));
+    console.log('[redis] using Railway Redis (REDIS_URL)');
+    return {
+      async get(key) {
+        const v = await client.get(key);
+        if (v == null) return null;
+        try { return JSON.parse(v); } catch { return v; }
+      },
+      async set(key, value, opts = {}) {
+        const args = [key, JSON.stringify(value)];
+        if (opts.ex) args.push('EX', opts.ex);
+        if (opts.nx) args.push('NX');
+        return client.set(...args);
+      },
+      async del(key) { return client.del(key); },
+    };
+  }
+  const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+  if (!url) console.error('[redis] No database configured — add a Redis service and set REDIS_URL');
+  return new Redis({
+    url,
+    token: process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN,
+  });
+}
+const redis = makeStore();
 
 const API = 'https://api.procore.com';
 const LOGIN = 'https://login.procore.com';
@@ -55,6 +84,22 @@ async function upSet(key, value, opts) {
   try { await redis.set(key, value, opts); return true; }
   catch (e) { console.warn('[redis] set failed:', key, e.message); return false; }
 }
+
+// Quick read/write test used by /api/setup-check (times out instead of hanging)
+async function storeCheck() {
+  const key = `healthcheck:${Date.now()}`;
+  const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timed out after 5 seconds')), 5000));
+  try {
+    await Promise.race([redis.set(key, { ok: true }, { ex: 60 }), timeout]);
+    const v = await Promise.race([redis.get(key), timeout]);
+    await redis.del(key).catch(() => {});
+    return v && v.ok ? { ok: true, detail: 'Saved and read back a test value' } : { ok: false, detail: 'Wrote a test value but could not read it back' };
+  } catch (e) {
+    return { ok: false, detail: e.message };
+  }
+}
+const storeType = () => process.env.REDIS_URL ? 'Railway Redis (REDIS_URL)'
+  : (process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL) ? 'Upstash' : null;
 
 // ── Sessions ──────────────────────────────────────────────────────────────────
 // The browser only holds a random session id. The Procore token lives in Redis.
@@ -474,6 +519,7 @@ function makeResourceHandler({ resource, concurrency = 3, fetchForProject, hydra
 
 module.exports = {
   // sessions
+  storeCheck, storeType,
   parseCookies, setCookie, exchangeToken, createSession, saveSession, destroySession,
   getSession, requireSession, makeCtx, expiresAtFrom,
   // procore
