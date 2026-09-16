@@ -205,3 +205,26 @@ export function buildWorkbook(ExcelJS, { rfis, submittals, changeEvents, changeO
   }
   return wb;
 }
+
+// "Export this view": one sheet with exactly the rows on screen, in on-screen order,
+// plus a line stating which filters were applied.
+export function buildViewWorkbook(ExcelJS, { kind, rows, title, filterText, companyName, flagLabel, asOf }) {
+  const c = columns(flagLabel)[kind];
+  if (!c) throw new Error(`Unknown export type: ${kind}`);
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "Enfield Enterprises Procore Monitor";
+  wb.created = new Date();
+  const ws = wb.addWorksheet(sheetName(title, new Set()));
+  setup(ws);
+  titleRows(ws, title, `${companyName ? `${companyName} — ` : ""}Data as of ${asOf}; exported ${new Date().toLocaleString("en-US", { dateStyle: "medium", timeStyle: "short" })}`);
+  const f = ws.getCell(3, 1);
+  f.value = `Filters: ${filterText}. ${rows.length} row${rows.length !== 1 ? "s" : ""}.`;
+  f.font = { ...FONT, italic: true };
+  headerRow(ws, 5, c);
+  const end = dataRows(ws, 6, c, rows);
+  c.forEach((col, i) => { ws.getColumn(i + 1).width = col.w; });
+  ws.views = [{ state: "frozen", ySplit: 5 }];
+  if (rows.length) ws.autoFilter = { from: { row: 5, column: 1 }, to: { row: end - 1, column: c.length } };
+  ws.headerFooter = { oddFooter: "&L&\"Times New Roman\"&10Enfield Enterprises, LLC&R&\"Times New Roman\"&10Page &P of &N" };
+  return wb;
+}

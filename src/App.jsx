@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
-import { buildWorkbook } from "./exportWorkbook.js";
+import { buildWorkbook, buildViewWorkbook } from "./exportWorkbook.js";
 
 // ── Sync behaviour ────────────────────────────────────────────────────────────
 // Opening the app shows the last saved snapshot and makes NO Procore calls.
@@ -163,6 +163,20 @@ function LinkChips({ items, state, emptyLabel, onOpen }) {
   );
 }
 
+// Lists the active filters so the exported file says what it contains
+const describe = parts => parts.filter(Boolean).join("; ") || "No filters (everything in this tab)";
+
+function ExportViewButton({ rows, busy, onExport, describeView }) {
+  const n = rows.length;
+  return (
+    <button onClick={()=>onExport(rows, describeView())} disabled={!n||busy}
+      title={n?"Download exactly the rows shown below as an Excel file":"Nothing to export with these filters"}
+      style={{...btn,color:C.brand,background:C.brandLight,border:"1px solid #e8c8c8",fontWeight:500,cursor:(!n||busy)?"not-allowed":"pointer",opacity:(!n||busy)?0.6:1}}>
+      {busy?"Building…":`Export this view (${n.toLocaleString()})`}
+    </button>
+  );
+}
+
 function PinBanner({ pin, onClear }) {
   if (!pin) return null;
   return (
@@ -208,7 +222,7 @@ function useSort(initialField, initialDir) {
 }
 
 // ── RFI Tab ───────────────────────────────────────────────────────────────────
-function RFITab({ rfis, loading }) {
+function RFITab({ rfis, loading, onExportView, exporting }) {
   const [search, setSearch] = useState("");
   const [projectFilter, setProjectFilter] = useState("All Projects");
   const [flagFilter, setFlagFilter] = useState("All Flags");
@@ -270,6 +284,11 @@ function RFITab({ rfis, loading }) {
           <button onClick={()=>{setSearch("");setProjectFilter("All Projects");setFlagFilter("All Flags");}} style={btn}>Clear</button>
         )}
         <button onClick={exportCSV} style={btn}>Download CSV</button>
+        <ExportViewButton rows={filtered} busy={exporting} onExport={onExportView} describeView={()=>describe([
+          flagFilter!=="All Flags" && `Flag: ${FLAGS[flagFilter].label}`,
+          projectFilter!=="All Projects" && `Project: ${projectFilter}`,
+          search.trim() && `Search: "${search.trim()}"`,
+        ])}/>
         <span style={{fontSize:12,color:C.textTertiary,whiteSpace:"nowrap"}}>{filtered.length} of {rfis.length} RFIs</span>
       </div>
 
@@ -318,7 +337,7 @@ function RFITab({ rfis, loading }) {
 }
 
 // ── Submittals Tab ────────────────────────────────────────────────────────────
-function SubmittalsTab({ submittals, loading }) {
+function SubmittalsTab({ submittals, loading, onExportView, exporting }) {
   const [search, setSearch] = useState("");
   const [projectFilter, setProjectFilter] = useState("All Projects");
   const [contractorFilter, setContractorFilter] = useState("All Contractors");
@@ -385,6 +404,17 @@ function SubmittalsTab({ submittals, loading }) {
         {(search||projectFilter!=="All Projects"||contractorFilter!=="All Contractors"||bicFilter!=="All")&&(
           <button onClick={()=>{setSearch("");setProjectFilter("All Projects");setContractorFilter("All Contractors");setBicFilter("All");}} style={btn}>Clear</button>
         )}
+        <ExportViewButton rows={filtered} busy={exporting} onExport={onExportView} describeView={()=>describe([
+          showClosed ? "Including closed" : "Open only",
+          hideDraft && "Drafts hidden",
+          tileFilter==="open" && "Open / pending",
+          tileFilter==="past_due" && "Past due",
+          tileFilter==="no_due_date" && "No due date",
+          projectFilter!=="All Projects" && `Project: ${projectFilter}`,
+          contractorFilter!=="All Contractors" && `Contractor: ${contractorFilter}`,
+          bicFilter!=="All" && `Ball in court: ${bicFilter}`,
+          search.trim() && `Search: "${search.trim()}"`,
+        ])}/>
         <span style={{fontSize:12,color:C.textTertiary,whiteSpace:"nowrap"}}>{filtered.length} shown</span>
       </div>
 
@@ -458,7 +488,7 @@ function SubmittalsTable({ filtered, sortField, sortDir, sort }) {
 }
 
 // ── Change Events Tab ─────────────────────────────────────────────────────────
-function ChangeEventsTab({ changeEvents, loading, coByEvent, coLoaded, pin, onClearPin, onJump }) {
+function ChangeEventsTab({ changeEvents, loading, coByEvent, coLoaded, pin, onClearPin, onJump, onExportView, exporting }) {
   const [search, setSearch] = useState("");
   const [projectFilter, setProjectFilter] = useState("All Projects");
   const [openOnly, setOpenOnly] = useState(true);
@@ -518,6 +548,9 @@ function ChangeEventsTab({ changeEvents, loading, coByEvent, coLoaded, pin, onCl
       </div>
 
       <PinBanner pin={pin} onClear={onClearPin}/>
+      {pin&&<div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+        <ExportViewButton rows={filtered} busy={exporting} onExport={onExportView} describeView={()=>`Change events linked to ${pin.label}`}/>
+      </div>}
 
       <div style={{...filterBar,opacity:pin?0.5:1,pointerEvents:pin?"none":"auto"}}>
         <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search title, number, reason…" style={{...inp,flex:1,minWidth:200}}/>
@@ -539,6 +572,15 @@ function ChangeEventsTab({ changeEvents, loading, coByEvent, coLoaded, pin, onCl
         {(search||projectFilter!=="All Projects"||reasonFilter!=="All"||createdByFilter!=="All"||noCoOnly)&&(
           <button onClick={()=>{setSearch("");setProjectFilter("All Projects");setReasonFilter("All");setCreatedByFilter("All");setNoCoOnly(false);}} style={btn}>Clear</button>
         )}
+        {!pin&&<ExportViewButton rows={filtered} busy={exporting} onExport={onExportView} describeView={()=>describe([
+          openOnly ? "Open & pending" : "All statuses",
+          hideVoided && "Voided hidden",
+          noCoOnly && "No change order found",
+          projectFilter!=="All Projects" && `Project: ${projectFilter}`,
+          reasonFilter!=="All" && `Reason: ${reasonFilter}`,
+          createdByFilter!=="All" && `Created by: ${createdByFilter}`,
+          search.trim() && `Search: "${search.trim()}"`,
+        ])}/>}
         <span style={{fontSize:12,color:C.textTertiary,whiteSpace:"nowrap"}}>{filtered.length} shown</span>
       </div>
 
@@ -592,7 +634,7 @@ function ChangeEventsTab({ changeEvents, loading, coByEvent, coLoaded, pin, onCl
 }
 
 // ── Change Orders Tab ─────────────────────────────────────────────────────────
-function ChangeOrdersTab({ changeOrders, loading, ceById, ceLoaded, pin, onClearPin, onJump }) {
+function ChangeOrdersTab({ changeOrders, loading, ceById, ceLoaded, pin, onClearPin, onJump, onExportView, exporting }) {
   const [search, setSearch] = useState("");
   const [projectFilter, setProjectFilter] = useState("All Projects");
   const [kindFilter, setKindFilter] = useState("all");
@@ -651,6 +693,9 @@ function ChangeOrdersTab({ changeOrders, loading, ceById, ceLoaded, pin, onClear
       </div>
 
       <PinBanner pin={pin} onClear={onClearPin}/>
+      {pin&&<div style={{display:"flex",justifyContent:"flex-end",marginBottom:12}}>
+        <ExportViewButton rows={filtered} busy={exporting} onExport={onExportView} describeView={()=>`Change orders linked to ${pin.label}`}/>
+      </div>}
 
       <div style={{...filterBar,opacity:pin?0.5:1,pointerEvents:pin?"none":"auto"}}>
         <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search title, number, vendor…" style={{...inp,flex:1,minWidth:200}}/>
@@ -667,6 +712,16 @@ function ChangeOrdersTab({ changeOrders, loading, ceById, ceLoaded, pin, onClear
         {(search||projectFilter!=="All Projects"||kindFilter!=="all"||contractFilter!=="All Contracts")&&(
           <button onClick={()=>{setSearch("");setProjectFilter("All Projects");setKindFilter("all");setContractFilter("All Contracts");}} style={btn}>Clear</button>
         )}
+        {!pin&&<ExportViewButton rows={filtered} busy={exporting} onExport={onExportView} describeView={()=>describe([
+          tileFilter==="unlinked" ? "Open, no change event"
+            : tileFilter==="stale" ? "Approved, change event still open"
+            : tileFilter==="late" ? "Past due"
+            : openOnly ? "Open & pending" : "All statuses",
+          kindFilter!=="all" && `Type: ${CO_KIND[kindFilter].label}`,
+          projectFilter!=="All Projects" && `Project: ${projectFilter}`,
+          contractFilter!=="All Contracts" && `Contract: ${contractFilter}`,
+          search.trim() && `Search: "${search.trim()}"`,
+        ])}/>}
         <span style={{fontSize:12,color:C.textTertiary,whiteSpace:"nowrap"}}>{filtered.length} shown</span>
       </div>
 
@@ -998,36 +1053,63 @@ export default function App() {
     if (window.confirm("Full rebuild re-downloads every record for every project and uses a lot of Procore API calls. Continue?")) loadAll("full");
   };
 
+  const [exportingView, setExportingView] = useState(false);
+
+  // Adds the link text used in Excel to change events / change orders
+  const enrichCE = rows => rows.map(e => ({
+    ...e,
+    linked_cos_label: (coByEvent.get(e.id) || []).map(co => `${CO_KIND[co.kind].short} ${co.number}`.trim()).join(", ") || "None found",
+  }));
+  const enrichCO = rows => rows.map(co => ({
+    ...co,
+    kind_label: CO_KIND[co.kind].label,
+    linked_events_label: (co.linked_events || []).length
+      ? co.linked_events.map(ev => `CE ${ceById.get(ev.id)?.number ?? ev.number ?? ev.id}`).join(", ")
+      : co.links_known ? "None found" : "Not available",
+  }));
+  const exportMeta = () => ({
+    companyName: session?.company?.name,
+    flagLabel: f => FLAGS[f]?.label || f,
+    asOf: oldestSync ? new Date(oldestSync).toLocaleString("en-US",{dateStyle:"medium",timeStyle:"short"}) : "unknown",
+  });
+  const loadExcel = async () => { const mod = await import("exceljs"); return mod.default || mod; };
+  const download = async (wb, name) => {
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const co = (session?.company?.name || "Procore").replace(/[^\w]+/g, "_").replace(/^_|_$/g, "");
+    const url = URL.createObjectURL(blob);
+    Object.assign(document.createElement("a"), { href:url, download:`${co}_${name}_${new Date().toISOString().split("T")[0]}.xlsx` }).click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  };
+
   const handleExport = async () => {
     setExporting(true);
     try {
-      const mod = await import("exceljs");
-      const ExcelJS = mod.default || mod;
-      const changeEvents = tabs.changeEvents.data.map(e => ({
-        ...e,
-        linked_cos_label: (coByEvent.get(e.id) || []).map(co => `${CO_KIND[co.kind].short} ${co.number}`.trim()).join(", ") || "None found",
-      }));
-      const changeOrders = tabs.changeOrders.data.map(co => ({
-        ...co,
-        kind_label: CO_KIND[co.kind].label,
-        linked_events_label: (co.linked_events || []).length
-          ? co.linked_events.map(ev => `CE ${ceById.get(ev.id)?.number ?? ev.number ?? ev.id}`).join(", ")
-          : co.links_known ? "None found" : "Not available",
-      }));
-      const wb = buildWorkbook(ExcelJS, {
-        rfis: tabs.rfis.data, submittals: tabs.submittals.data, changeEvents, changeOrders,
-        companyName: session?.company?.name,
-        flagLabel: f => FLAGS[f]?.label || f,
-        asOf: oldestSync ? new Date(oldestSync).toLocaleString("en-US",{dateStyle:"medium",timeStyle:"short"}) : "unknown",
+      const wb = buildWorkbook(await loadExcel(), {
+        rfis: tabs.rfis.data, submittals: tabs.submittals.data,
+        changeEvents: enrichCE(tabs.changeEvents.data), changeOrders: enrichCO(tabs.changeOrders.data),
+        ...exportMeta(),
       });
-      const buf = await wb.xlsx.writeBuffer();
-      const blob = new Blob([buf], { type:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-      const co = (session?.company?.name || "Procore").replace(/[^\w]+/g, "_").replace(/^_|_$/g, "");
-      Object.assign(document.createElement("a"), { href:URL.createObjectURL(blob), download:`${co}_Procore_Report_${new Date().toISOString().split("T")[0]}.xlsx` }).click();
+      await download(wb, "Procore_Report");
     } catch (e) {
       alert(`Export failed: ${e.message}`);
     } finally {
       setExporting(false);
+    }
+  };
+
+  // "Export this view": only the rows currently shown, in the order shown
+  const exportView = kind => async (rows, filterText) => {
+    setExportingView(true);
+    try {
+      const prepared = kind === "changeEvents" ? enrichCE(rows) : kind === "changeOrders" ? enrichCO(rows) : rows;
+      const label = TABS.find(t => t.id === kind).label;
+      const wb = buildViewWorkbook(await loadExcel(), { kind, rows: prepared, title: `${label}, filtered view`, filterText, ...exportMeta() });
+      await download(wb, `${label.replace(/\s+/g, "_")}_View`);
+    } catch (e) {
+      alert(`Export failed: ${e.message}`);
+    } finally {
+      setExportingView(false);
     }
   };
 
@@ -1085,7 +1167,7 @@ export default function App() {
           <button onClick={handleExport} disabled={exporting||!allLoaded}
             title={!allLoaded?"Wait for all three tabs to load":undefined}
             style={{background:C.brand,color:"#fff",border:"none",borderRadius:10,padding:"8px 16px",fontSize:12,fontWeight:500,cursor:(exporting||!allLoaded)?"not-allowed":"pointer",fontFamily:F,opacity:(exporting||!allLoaded)?0.7:1}}>
-            {exporting?"Building…":"Export to Excel"}
+            {exporting?"Building…":"Export everything"}
           </button>
           {session?.user&&(
             <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",lineHeight:1.25,marginLeft:4}}>
@@ -1122,14 +1204,16 @@ export default function App() {
           </div>
         )}
 
-        {activeTab==="rfis"&&<RFITab rfis={tabs.rfis.data} loading={tabs.rfis.loading}/>}
-        {activeTab==="submittals"&&<SubmittalsTab submittals={tabs.submittals.data} loading={tabs.submittals.loading}/>}
+        {activeTab==="rfis"&&<RFITab rfis={tabs.rfis.data} loading={tabs.rfis.loading} onExportView={exportView("rfis")} exporting={exportingView}/>}
+        {activeTab==="submittals"&&<SubmittalsTab submittals={tabs.submittals.data} loading={tabs.submittals.loading} onExportView={exportView("submittals")} exporting={exportingView}/>}
         {activeTab==="changeEvents"&&<ChangeEventsTab changeEvents={tabs.changeEvents.data} loading={tabs.changeEvents.loading}
           coByEvent={coByEvent} coLoaded={tabs.changeOrders.loaded}
-          pin={pin?.tab==="changeEvents"?pin:null} onClearPin={()=>setPin(null)} onJump={jump}/>}
+          pin={pin?.tab==="changeEvents"?pin:null} onClearPin={()=>setPin(null)} onJump={jump}
+          onExportView={exportView("changeEvents")} exporting={exportingView}/>}
         {activeTab==="changeOrders"&&<ChangeOrdersTab changeOrders={tabs.changeOrders.data} loading={tabs.changeOrders.loading}
           ceById={ceById} ceLoaded={tabs.changeEvents.loaded}
-          pin={pin?.tab==="changeOrders"?pin:null} onClearPin={()=>setPin(null)} onJump={jump}/>}
+          pin={pin?.tab==="changeOrders"?pin:null} onClearPin={()=>setPin(null)} onJump={jump}
+          onExportView={exportView("changeOrders")} exporting={exportingView}/>}
 
         <DataHealthFooter tabs={tabs} rateLimit={rateLimit} onFullRebuild={fullRebuild} busy={busy}/>
       </main>
