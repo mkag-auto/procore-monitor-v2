@@ -18,14 +18,28 @@ const {
 
 const CLOSED = new Set(['approved', 'rejected', 'void', 'voided', 'no_charge', 'closed']);
 
-// Procore web links. These follow Procore's classic URL layout and have not been
-// verified against your account — if one opens the wrong page, fix it here.
+// ── Procore web links ─────────────────────────────────────────────────────────
+// Confirmed against live Procore pages, Sept 2026:
+//   PCCO → .../prime_contracts/{contract}/change_orders/prime-change-order-batches/{id}
+//   PCO  → .../prime_contracts/{contract}/change_orders/prime-change-orders/{id}
+//   CCO  → .../commitments/work_order_contracts/{contract}/change_orders/commitment-change-orders/{id}
+//          (Procore also opened a subcontract CCO under purchase_order_contracts,
+//           so one wording is used for both.)
+// Links are rebuilt every time data is served (see hydrate), so if Procore changes
+// these again, fixing this block is enough. No full rebuild needed for records
+// that already carry company_id.
 const WEB = 'https://us02.procore.com';
-const webUrl = {
-  prime_co:      (pid, r) => `${WEB}/${pid}/project/prime_contracts/${r.contract_id}/change_order_packages/${r.raw_id}`,
-  pco:           (pid, r) => `${WEB}/${pid}/project/potential_change_orders/${r.raw_id}`,
-  commitment_co: (pid, r) => `${WEB}/${pid}/project/commitments/${r.contract_id}/change_orders/${r.raw_id}`,
+const LINK_PATHS = {
+  prime_co:      r => `prime_contracts/${r.contract_id}/change_orders/prime-change-order-batches/${r.raw_id}`,
+  pco:           r => `prime_contracts/${r.contract_id}/change_orders/prime-change-orders/${r.raw_id}`,
+  commitment_co: r => `commitments/work_order_contracts/${r.contract_id}/change_orders/commitment-change-orders/${r.raw_id}`,
 };
+
+function buildUrl(r) {
+  const path = LINK_PATHS[r.kind];
+  if (!path || !r.company_id || r.project_id == null || r.contract_id == null || r.raw_id == null) return null;
+  return `${WEB}/webclients/host/companies/${r.company_id}/projects/${r.project_id}/tools/contracts/${path(r)}`;
+}
 
 const digits = v => String(v ?? '').replace(/\D+/g, '').replace(/^0+/, '');
 const uniqEvents = list => {
@@ -80,6 +94,7 @@ async function fetchForProject(ctx, project, since, cached) {
       id: `${kind}-${o.id}`,
       raw_id: o.id,
       kind,
+      company_id: ctx.companyId ?? null,
       project_id: pid,
       project_name: name,
       number: safeStr(o.number) ?? '',
@@ -107,7 +122,7 @@ async function fetchForProject(ctx, project, since, cached) {
     const r = base('commitment_co', o);
     r.links_known = Array.isArray(o.change_events);
     r.linked_events = uniqEvents(o.change_events || []);
-    r.procore_url = webUrl.commitment_co(pid, r);
+    r.procore_url = buildUrl(r);
     records.push(r);
   }
 
@@ -122,7 +137,7 @@ async function fetchForProject(ctx, project, since, cached) {
       () => procoreGetAll(`/rest/v1.0/potential_change_orders/${o.id}/line_items`, ctx, params), null);
     r.links_known = items !== null;
     r.linked_events = uniqEvents((items || []).map(li => ({ id: eventIdFromLineItem(li), number: null })));
-    r.procore_url = webUrl.pco(pid, r);
+    r.procore_url = buildUrl(r);
     records.push(r);
   }
 
@@ -134,7 +149,11 @@ async function fetchForProject(ctx, project, since, cached) {
   const packageRecords = packages.filter(o => o && typeof o === 'object' && !o.deleted_at).map(o => base('prime_co', o));
   // On incremental syncs, re-link cached packages too (a changed PCO may now point at them)
   const pkgIdsNow = new Set(packageRecords.map(r => r.id));
-  for (const r of cached) if (r.kind === 'prime_co' && !pkgIdsNow.has(r.id)) packageRecords.push({ ...r });
+  for (const r of cached) {
+    if (r.kind === 'prime_co' && !pkgIdsNow.has(r.id)) {
+      packageRecords.push({ ...r, company_id: r.company_id ?? ctx.companyId ?? null });
+    }
+  }
 
   for (const r of packageRecords) {
     const matches = pcoList.filter(p =>
@@ -145,7 +164,7 @@ async function fetchForProject(ctx, project, since, cached) {
     r.linked_pcos = matches.map(p => ({ id: p.id, number: p.number }));
     r.links_known = matches.length > 0 && matches.every(p => p.links_known);
     r.linked_events = uniqEvents(matches.flatMap(p => p.linked_events || []));
-    r.procore_url = webUrl.prime_co(pid, r);
+    r.procore_url = buildUrl(r);
     records.push(r);
   }
 
@@ -159,6 +178,9 @@ function hydrate(r, today) {
     ...r,
     status_key,
     is_open,
+    // Rebuilt on every read so link fixes apply without re-downloading.
+    // Older saved rows without company_id keep their stored link until a Full rebuild.
+    procore_url: buildUrl(r) || r.procore_url || null,
     days_open: is_open ? daysSince(r.created_at, today) : null,
     days_past_due: is_open ? daysSince(r.due_date, today) : null,
   };
